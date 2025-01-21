@@ -407,6 +407,8 @@ type VerifyBlobOptions struct {
 
 	// ContentMediaType is the media-type type of the content being verified.
 	ContentMediaType string
+
+	ArtifactReference string
 }
 
 // VerifyBlob performs signature verification for a blob using notation supported
@@ -432,6 +434,51 @@ func VerifyBlob(ctx context.Context, blobVerifier BlobVerifier, blobReader io.Re
 		return ocispec.Descriptor{}, nil, err
 	}
 	getDescFunc := getDescriptorFunc(ctx, blobReader, verifyBlobOpts.ContentMediaType, verifyBlobOpts.UserMetadata)
+	vo, err := blobVerifier.VerifyBlob(ctx, getDescFunc, signature, verifyBlobOpts.BlobVerifierVerifyOptions)
+	if err != nil {
+		return ocispec.Descriptor{}, nil, err
+	}
+
+	var desc ocispec.Descriptor
+	if err = json.Unmarshal(vo.EnvelopeContent.Payload.Content, &desc); err != nil {
+		return ocispec.Descriptor{}, nil, err
+	}
+	return desc, vo, nil
+}
+
+func VerifyBlobFromRegistry(ctx context.Context, blobVerifier BlobVerifier, repo registry.BlobRepository, verifyBlobOpts VerifyBlobOptions) (ocispec.Descriptor, *VerificationOutcome, error) {
+	logger := log.GetLogger(ctx)
+
+	// sanity check
+	if blobVerifier == nil {
+		return ocispec.Descriptor{}, nil, errors.New("blobVerifier cannot be nil")
+	}
+	if repo == nil {
+		return ocispec.Descriptor{}, nil, errors.New("repo cannot be nil")
+	}
+	if err := validateContentMediaType(verifyBlobOpts.ContentMediaType); err != nil {
+		return ocispec.Descriptor{}, nil, err
+	}
+
+	// get manifest descriptor
+	artifactRef := verifyBlobOpts.ArtifactReference
+	ref, err := orasRegistry.ParseReference(artifactRef)
+	if err != nil {
+		return ocispec.Descriptor{}, nil, err
+	}
+	if ref.Reference == "" {
+		return ocispec.Descriptor{}, nil, err
+	}
+	manifestDescriptor, err := repo.Resolve(ctx, ref.Reference)
+	if err != nil {
+		return ocispec.Descriptor{}, nil, err
+	}
+	blobDescriptor, err := repo.GetBlobDesc(ctx, manifestDescriptor)
+	if err != nil {
+		return ocispec.Descriptor{}, nil, err
+	}
+	getDescFunc := trivialDescriptorFunc(ctx, blobDescriptor, verifyBlobOpts.UserMetadata)
+
 	vo, err := blobVerifier.VerifyBlob(ctx, getDescFunc, signature, verifyBlobOpts.BlobVerifierVerifyOptions)
 	if err != nil {
 		return ocispec.Descriptor{}, nil, err
@@ -540,6 +587,7 @@ func Verify(ctx context.Context, verifier Verifier, repo registry.Repository, ve
 				verificationFailedErrorArray = append(verificationFailedErrorArray, outcome.Error)
 				continue
 			}
+
 			// at this point, the signature is verified successfully
 			verificationSucceeded = true
 
@@ -634,4 +682,10 @@ func validateSigMediaType(sigMediaType string) error {
 		return fmt.Errorf("invalid signature media-type %q", sigMediaType)
 	}
 	return nil
+}
+
+func trivialDescriptorFunc(ctx context.Context, blobDescriptor ocispec.Descriptor, userMetadata map[string]string) BlobDescriptorGenerator {
+	return func(hashAlgo digest.Algorithm) (ocispec.Descriptor, error) {
+		return addUserMetadataToDescriptor(ctx, blobDescriptor, userMetadata)
+	}
 }

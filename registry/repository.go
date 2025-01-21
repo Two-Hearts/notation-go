@@ -157,6 +157,37 @@ func (c *repositoryClient) PushSignature(ctx context.Context, mediaType string, 
 	return blobDesc, manifestDesc, nil
 }
 
+// GetBlobDesc returns the first layer descriptor given a manifest descriptor
+// with media type `application/vnd.oci.image.manifest.v1+json`.
+func (c *repositoryClient) GetBlobDesc(ctx context.Context, manifestDesc ocispec.Descriptor) (ocispec.Descriptor, error) {
+	if manifestDesc.MediaType != ocispec.MediaTypeImageManifest {
+		return ocispec.Descriptor{}, fmt.Errorf("manifest mediaType requires %q, got %q", ocispec.MediaTypeImageManifest, manifestDesc.MediaType)
+	}
+	if manifestDesc.Size > maxManifestSizeLimit {
+		return ocispec.Descriptor{}, fmt.Errorf("manifest too large: %d bytes", manifestDesc.Size)
+	}
+
+	// fetch the manifest from manifestDesc
+	var fetcher content.Fetcher = c.GraphTarget
+	if repo, ok := c.GraphTarget.(registry.Repository); ok {
+		fetcher = repo.Manifests()
+	}
+	manifestJSON, err := content.FetchAll(ctx, fetcher, manifestDesc)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+
+	// get the blob descriptor from manifest
+	var manifest ocispec.Manifest
+	if err := json.Unmarshal(manifestJSON, &manifest); err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	if len(manifest.Layers) != 1 {
+		return ocispec.Descriptor{}, fmt.Errorf("manifest requries exactly one blob layer, got %d", len(manifest.Layers))
+	}
+	return manifest.Layers[0], nil
+}
+
 // getSignatureBlobDesc returns signature blob descriptor from
 // signature manifest blobs or layers given signature manifest descriptor
 func (c *repositoryClient) getSignatureBlobDesc(ctx context.Context, sigManifestDesc ocispec.Descriptor) (ocispec.Descriptor, error) {

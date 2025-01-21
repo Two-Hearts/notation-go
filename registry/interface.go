@@ -38,3 +38,9 @@ type Repository interface {
 	// linked signature envelope blob.
 	PushSignature(ctx context.Context, mediaType string, blob []byte, subject ocispec.Descriptor, annotations map[string]string) (blobDesc, manifestDesc ocispec.Descriptor, err error)
 }
+
+type BlobRepository interface {
+	Repository
+
+	GetBlobDesc(ctx context.Context, manifestDesc ocispec.Descriptor) (ocispec.Descriptor, error)
+}
