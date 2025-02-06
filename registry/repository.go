@@ -52,7 +52,7 @@ var (
 // it is kept for future extensibility
 type RepositoryOptions struct{}
 
-// repositoryClient implements [Repository]
+// repositoryClient implements [Repository] and [BlobRepository]
 type repositoryClient struct {
 	oras.GraphTarget
 	RepositoryOptions
@@ -63,6 +63,12 @@ type repositoryClient struct {
 // - [remote.Repository](https://pkg.go.dev/oras.land/oras-go/v2/registry/remote#Repository)
 // - [oci.Store](https://pkg.go.dev/oras.land/oras-go/v2/content/oci#Store)
 func NewRepository(target oras.GraphTarget) Repository {
+	return &repositoryClient{
+		GraphTarget: target,
+	}
+}
+
+func NewBlobRepository(target oras.GraphTarget) BlobRepository {
 	return &repositoryClient{
 		GraphTarget: target,
 	}
