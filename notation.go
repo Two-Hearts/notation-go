@@ -446,49 +446,110 @@ func VerifyBlob(ctx context.Context, blobVerifier BlobVerifier, blobReader io.Re
 	return desc, vo, nil
 }
 
-func VerifyBlobFromRegistry(ctx context.Context, blobVerifier BlobVerifier, repo registry.BlobRepository, verifyBlobOpts VerifyBlobOptions) (ocispec.Descriptor, *VerificationOutcome, error) {
+func VerifyBlobFromRegistry(ctx context.Context, blobVerifier BlobVerifier, repo registry.BlobRepository, verifyBlobOpts VerifyBlobOptions) (ocispec.Descriptor, ocispec.Descriptor, []*VerificationOutcome, error) {
 	logger := log.GetLogger(ctx)
 
 	// sanity check
 	if blobVerifier == nil {
-		return ocispec.Descriptor{}, nil, errors.New("blobVerifier cannot be nil")
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, errors.New("blobVerifier cannot be nil")
 	}
 	if repo == nil {
-		return ocispec.Descriptor{}, nil, errors.New("repo cannot be nil")
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, errors.New("repo cannot be nil")
 	}
 	if err := validateContentMediaType(verifyBlobOpts.ContentMediaType); err != nil {
-		return ocispec.Descriptor{}, nil, err
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, err
 	}
 
 	// get manifest descriptor
 	artifactRef := verifyBlobOpts.ArtifactReference
 	ref, err := orasRegistry.ParseReference(artifactRef)
 	if err != nil {
-		return ocispec.Descriptor{}, nil, err
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, err
 	}
 	if ref.Reference == "" {
-		return ocispec.Descriptor{}, nil, err
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, err
 	}
-	manifestDescriptor, err := repo.Resolve(ctx, ref.Reference)
+	artifactDescriptor, err := repo.Resolve(ctx, ref.Reference)
 	if err != nil {
-		return ocispec.Descriptor{}, nil, err
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, err
 	}
-	blobDescriptor, err := repo.GetBlobDesc(ctx, manifestDescriptor)
+	targetBlobDescriptor, err := repo.GetBlobDesc(ctx, artifactDescriptor)
 	if err != nil {
-		return ocispec.Descriptor{}, nil, err
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, err
 	}
-	getDescFunc := trivialDescriptorFunc(ctx, blobDescriptor, verifyBlobOpts.UserMetadata)
+	getDescFunc := trivialDescriptorFunc(ctx, targetBlobDescriptor, verifyBlobOpts.UserMetadata)
 
-	vo, err := blobVerifier.VerifyBlob(ctx, getDescFunc, signature, verifyBlobOpts.BlobVerifierVerifyOptions)
-	if err != nil {
-		return ocispec.Descriptor{}, nil, err
+	logger.Debug("Fetching signature manifests")
+	var verificationSucceeded bool
+	var verificationOutcomes []*VerificationOutcome
+	var verificationFailedErrorArray = []error{ErrorVerificationFailed{}}
+	numOfSignatureProcessed := 0
+	err = repo.ListSignatures(ctx, artifactDescriptor, func(signatureManifests []ocispec.Descriptor) error {
+		// process signatures
+		for _, sigManifestDesc := range signatureManifests {
+			numOfSignatureProcessed++
+			logger.Infof("Processing signature with manifest mediaType: %v and digest: %v", sigManifestDesc.MediaType, sigManifestDesc.Digest)
+			// get signature envelope
+			sigBlob, sigDesc, err := repo.FetchSignatureBlob(ctx, sigManifestDesc)
+			if err != nil {
+				return ErrorSignatureRetrievalFailed{Msg: fmt.Sprintf("unable to retrieve digital signature with digest %q associated with %q from the Repository, error : %v", sigManifestDesc.Digest, artifactRef, err.Error())}
+			}
+
+			// using signature media type fetched from registry
+			verifyBlobOpts.BlobVerifierVerifyOptions.SignatureMediaType = sigDesc.MediaType
+
+			outcome, err := blobVerifier.VerifyBlob(ctx, getDescFunc, sigBlob, verifyBlobOpts.BlobVerifierVerifyOptions)
+			if err != nil {
+				logger.Warnf("Signature %v failed verification with error: %v", sigManifestDesc.Digest, err)
+				if outcome == nil {
+					logger.Error("Got nil outcome. Expecting non-nil outcome on verification failure")
+					return err
+				}
+				outcome.Error = fmt.Errorf("failed to verify signature with digest %v, %w", sigManifestDesc.Digest, outcome.Error)
+				verificationFailedErrorArray = append(verificationFailedErrorArray, outcome.Error)
+				continue
+			}
+			var desc ocispec.Descriptor
+			if err = json.Unmarshal(outcome.EnvelopeContent.Payload.Content, &desc); err != nil {
+				logger.Warnf("Signature %v failed verification with error: %v", sigManifestDesc.Digest, err)
+				if outcome == nil {
+					logger.Error("Got nil outcome. Expecting non-nil outcome on verification failure")
+					return err
+				}
+				outcome.Error = fmt.Errorf("failed to verify signature with digest %v, %w", sigManifestDesc.Digest, outcome.Error)
+				verificationFailedErrorArray = append(verificationFailedErrorArray, outcome.Error)
+				continue
+			}
+
+			// at this point, the signature is verified successfully
+			verificationSucceeded = true
+
+			// on success, verificationOutcomes only contains the
+			// succeeded outcome
+			verificationOutcomes = []*VerificationOutcome{outcome}
+			logger.Debugf("Signature verification succeeded for blob %v with signature digest %v", targetBlobDescriptor.Digest, sigManifestDesc.Digest)
+
+			// early break on success
+			return errDoneVerification
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errDoneVerification) {
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, err
 	}
 
-	var desc ocispec.Descriptor
-	if err = json.Unmarshal(vo.EnvelopeContent.Payload.Content, &desc); err != nil {
-		return ocispec.Descriptor{}, nil, err
+	// If there's no signature associated with the reference
+	if numOfSignatureProcessed == 0 {
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, ErrorSignatureRetrievalFailed{Msg: fmt.Sprintf("no signature is associated with %q, make sure the artifact was signed successfully", artifactRef)}
 	}
-	return desc, vo, nil
+
+	// Verification Failed
+	if !verificationSucceeded {
+		logger.Debugf("Signature verification failed for all the signatures associated with artifact %v", artifactDescriptor.Digest)
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, verificationOutcomes, errors.Join(verificationFailedErrorArray...)
+	}
+
+	return artifactDescriptor, targetBlobDescriptor, verificationOutcomes, nil
 }
 
 // Verify performs signature verification on each of the notation supported
