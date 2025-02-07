@@ -487,6 +487,10 @@ func VerifyBlobFromRegistry(ctx context.Context, blobVerifier BlobVerifier, repo
 	err = repo.ListSignatures(ctx, artifactDescriptor, func(signatureManifests []ocispec.Descriptor) error {
 		// process signatures
 		for _, sigManifestDesc := range signatureManifests {
+			// only verify with blob signatures
+			if isBlobSig, ok := sigManifestDesc.Annotations[envelope.AnnotationBlobSignature]; !ok || strings.ToLower(isBlobSig) != "true" {
+				continue
+			}
 			numOfSignatureProcessed++
 			logger.Infof("Processing signature with manifest mediaType: %v and digest: %v", sigManifestDesc.MediaType, sigManifestDesc.Digest)
 			// get signature envelope

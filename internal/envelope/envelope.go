@@ -26,6 +26,7 @@ import (
 const (
 	MediaTypePayloadV1            = "application/vnd.cncf.notary.payload.v1+json"
 	AnnotationX509ChainThumbprint = "io.cncf.notary.x509chain.thumbprint#S256"
+	AnnotationBlobSignature       = "io.cncf.notary.blob.signature"
 )
 
 // Payload describes the content that gets signed.
