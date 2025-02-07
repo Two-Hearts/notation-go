@@ -446,15 +446,15 @@ func VerifyBlob(ctx context.Context, blobVerifier BlobVerifier, blobReader io.Re
 	return desc, vo, nil
 }
 
-func VerifyBlobFromRegistry(ctx context.Context, blobVerifier BlobVerifier, repo registry.BlobRepository, verifyBlobOpts VerifyBlobOptions) (ocispec.Descriptor, ocispec.Descriptor, []*VerificationOutcome, error) {
+func VerifyBlobFromRegistry(ctx context.Context, blobVerifier BlobVerifier, blobRepo registry.BlobRepository, verifyBlobOpts VerifyBlobOptions) (ocispec.Descriptor, ocispec.Descriptor, []*VerificationOutcome, error) {
 	logger := log.GetLogger(ctx)
 
 	// sanity check
 	if blobVerifier == nil {
 		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, errors.New("blobVerifier cannot be nil")
 	}
-	if repo == nil {
-		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, errors.New("repo cannot be nil")
+	if blobRepo == nil {
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, errors.New("blobRepo cannot be nil")
 	}
 	if err := validateContentMediaType(verifyBlobOpts.ContentMediaType); err != nil {
 		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, err
@@ -469,11 +469,11 @@ func VerifyBlobFromRegistry(ctx context.Context, blobVerifier BlobVerifier, repo
 	if ref.Reference == "" {
 		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, err
 	}
-	artifactDescriptor, err := repo.Resolve(ctx, ref.Reference)
+	artifactDescriptor, err := blobRepo.Resolve(ctx, ref.Reference)
 	if err != nil {
 		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, err
 	}
-	targetBlobDescriptor, err := repo.GetBlobDesc(ctx, artifactDescriptor)
+	targetBlobDescriptor, err := blobRepo.GetBlobDesc(ctx, artifactDescriptor)
 	if err != nil {
 		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, err
 	}
@@ -484,7 +484,7 @@ func VerifyBlobFromRegistry(ctx context.Context, blobVerifier BlobVerifier, repo
 	var verificationOutcomes []*VerificationOutcome
 	var verificationFailedErrorArray = []error{ErrorVerificationFailed{}}
 	numOfSignatureProcessed := 0
-	err = repo.ListSignatures(ctx, artifactDescriptor, func(signatureManifests []ocispec.Descriptor) error {
+	err = blobRepo.ListSignatures(ctx, artifactDescriptor, func(signatureManifests []ocispec.Descriptor) error {
 		// process signatures
 		for _, sigManifestDesc := range signatureManifests {
 			// only verify with blob signatures
@@ -492,11 +492,11 @@ func VerifyBlobFromRegistry(ctx context.Context, blobVerifier BlobVerifier, repo
 				continue
 			}
 			numOfSignatureProcessed++
-			logger.Infof("Processing signature with manifest mediaType: %v and digest: %v", sigManifestDesc.MediaType, sigManifestDesc.Digest)
+			logger.Infof("Processing blob signature with manifest mediaType: %v and digest: %v", sigManifestDesc.MediaType, sigManifestDesc.Digest)
 			// get signature envelope
-			sigBlob, sigDesc, err := repo.FetchSignatureBlob(ctx, sigManifestDesc)
+			sigBlob, sigDesc, err := blobRepo.FetchSignatureBlob(ctx, sigManifestDesc)
 			if err != nil {
-				return ErrorSignatureRetrievalFailed{Msg: fmt.Sprintf("unable to retrieve digital signature with digest %q associated with %q from the Repository, error : %v", sigManifestDesc.Digest, artifactRef, err.Error())}
+				return ErrorSignatureRetrievalFailed{Msg: fmt.Sprintf("unable to retrieve blob signature with digest %q associated with %q from the Repository, error : %v", sigManifestDesc.Digest, artifactRef, err.Error())}
 			}
 
 			// using signature media type fetched from registry
@@ -504,23 +504,23 @@ func VerifyBlobFromRegistry(ctx context.Context, blobVerifier BlobVerifier, repo
 
 			outcome, err := blobVerifier.VerifyBlob(ctx, getDescFunc, sigBlob, verifyBlobOpts.BlobVerifierVerifyOptions)
 			if err != nil {
-				logger.Warnf("Signature %v failed verification with error: %v", sigManifestDesc.Digest, err)
+				logger.Warnf("Signature %v failed blob verification with error: %v", sigManifestDesc.Digest, err)
 				if outcome == nil {
-					logger.Error("Got nil outcome. Expecting non-nil outcome on verification failure")
+					logger.Error("Got nil outcome. Expecting non-nil outcome on blob verification failure")
 					return err
 				}
-				outcome.Error = fmt.Errorf("failed to verify signature with digest %v, %w", sigManifestDesc.Digest, outcome.Error)
+				outcome.Error = fmt.Errorf("failed to verify blob signature with digest %v, %w", sigManifestDesc.Digest, outcome.Error)
 				verificationFailedErrorArray = append(verificationFailedErrorArray, outcome.Error)
 				continue
 			}
 			var desc ocispec.Descriptor
 			if err = json.Unmarshal(outcome.EnvelopeContent.Payload.Content, &desc); err != nil {
-				logger.Warnf("Signature %v failed verification with error: %v", sigManifestDesc.Digest, err)
+				logger.Warnf("Signature %v failed blob verification with error: %v", sigManifestDesc.Digest, err)
 				if outcome == nil {
-					logger.Error("Got nil outcome. Expecting non-nil outcome on verification failure")
+					logger.Error("Got nil outcome. Expecting non-nil outcome on blob verification failure")
 					return err
 				}
-				outcome.Error = fmt.Errorf("failed to verify signature with digest %v, %w", sigManifestDesc.Digest, outcome.Error)
+				outcome.Error = fmt.Errorf("failed to verify blob signature with digest %v, %w", sigManifestDesc.Digest, outcome.Error)
 				verificationFailedErrorArray = append(verificationFailedErrorArray, outcome.Error)
 				continue
 			}
@@ -544,12 +544,12 @@ func VerifyBlobFromRegistry(ctx context.Context, blobVerifier BlobVerifier, repo
 
 	// If there's no signature associated with the reference
 	if numOfSignatureProcessed == 0 {
-		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, ErrorSignatureRetrievalFailed{Msg: fmt.Sprintf("no signature is associated with %q, make sure the artifact was signed successfully", artifactRef)}
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, nil, ErrorSignatureRetrievalFailed{Msg: fmt.Sprintf("no blob signature is associated with %q, make sure the blob was signed successfully", artifactRef)}
 	}
 
 	// Verification Failed
 	if !verificationSucceeded {
-		logger.Debugf("Signature verification failed for all the signatures associated with artifact %v", artifactDescriptor.Digest)
+		logger.Debugf("Signature verification failed for all the signatures associated with blob %v", artifactDescriptor.Digest)
 		return ocispec.Descriptor{}, ocispec.Descriptor{}, verificationOutcomes, errors.Join(verificationFailedErrorArray...)
 	}
 
